@@ -617,11 +617,11 @@ const UNIT_DEFAULT = [
           <div class="w-9 h-9 rounded-xl bg-[var(--sarang)] flex items-center justify-center text-white">${Icon("hex","w-5 h-5")}</div>
           <span class="font-bold text-lg tracking-tight">Efromatika</span>
         </div>
-        <p class="text-sm text-[var(--tanah)]/70 mb-6">Magang HIMATIKA · masuk dengan akun panitia</p>
+        <p class="text-sm text-[var(--tanah)]/70 mb-6">Cek Email dan Password di Email ITERA-mu!</p>
         <form id="loginForm" class="space-y-3">
           <div>
             <label class="text-xs font-medium text-[var(--tanah)]/70">Email</label>
-            <input required type="email" id="email" class="mt-1 w-full rounded-xl border border-[var(--tanah)]/15 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--sarang)]" placeholder="nama@student.itera.ac.id" />
+            <input required type="email" id="email" class="mt-1 w-full rounded-xl border border-[var(--tanah)]/15 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--sarang)]" placeholder="nama.unim@magang.efro" />
           </div>
           <div>
             <label class="text-xs font-medium text-[var(--tanah)]/70">Password</label>
