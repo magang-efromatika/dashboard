@@ -10,7 +10,7 @@ const FIREBASE_CONFIG = {
 };
 
 // 2) URL Web App dari Google Apps Script (Deploy > New deployment > Web app)
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxu4vjV1MBKmscsR_vOzT0TlPgdvLbEBEqf-gK9C4iUkfBmr2b-9iGSUBYk_ndZHc76/exec";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyAItn052GrHyliqie-NqsNTf3UZO4qQAh56liOq-DcPsOqXq4ROF53c6V1OHux6Y7x/exec";
 
 // 3) Daftar email admin (bisa lihat & kelola pendaftaran)
 const ADMIN_EMAILS = [
@@ -437,39 +437,83 @@ const UNIT_DEFAULT = [
     allRegs: [],            // dimuat dari Apps Script untuk admin
     view: "login",          // login | dashboard | daftar | admin
     loading: false,
-    toast: null,
+    ready: false,           // units + status pendaftaran sudah selesai dimuat dari server
+    loadError: false,       // gagal memuat data awal
   };
+  let submitting = false;   // kunci anti klik ganda saat submit
+  const MAX_CV_BYTES = 3 * 1024 * 1024; // 3 MB
 
   const isAdmin = () => state.user && ADMIN_EMAILS.includes(state.user.email);
 
   function setState(patch){ state = {...state, ...patch}; render(); }
+  function setStateSilent(patch){ state = {...state, ...patch}; } // ubah state TANPA render ulang (form tidak terhapus)
+
+  let toastTimer = null;
   function showToast(msg, kind){
-    setState({ toast: { msg, kind: kind||"info" } });
-    setTimeout(()=>{ if(state.toast && state.toast.msg===msg) setState({toast:null}); }, 3200);
+    // Toast dirender di luar #app supaya tidak me-reset isi form
+    let root = document.getElementById("toastRoot");
+    if(!root){ root = document.createElement("div"); root.id = "toastRoot"; document.body.appendChild(root); }
+    const bad = kind === "error";
+    const box = document.createElement("div");
+    box.className = "fixed bottom-5 left-1/2 -translate-x-1/2 z-50 " + (bad ? "bg-red-600" : "bg-[var(--tanah)]") +
+      " text-white text-sm px-4 py-2.5 rounded-xl shadow-lg fade-in max-w-[90vw] text-center";
+    box.textContent = msg;
+    root.innerHTML = "";
+    root.appendChild(box);
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(()=>{ root.innerHTML = ""; }, 3500);
   }
 
   /* ---------- Apps Script bridge ---------- */
-  async function callBackend(action, payload){
+  async function callBackend(action, payload, timeoutMs = 30000){
     if(!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes("GANTI")){
       console.warn("APPS_SCRIPT_URL belum diisi — memakai data lokal sementara.");
       return { ok:false, offline:true };
     }
+    const ctrl = new AbortController();
+    const timer = setTimeout(()=> ctrl.abort(), timeoutMs);
     try{
       const res = await fetch(APPS_SCRIPT_URL, {
         method:"POST",
         headers:{ "Content-Type":"text/plain;charset=utf-8" }, // hindari preflight CORS pada Apps Script
         body: JSON.stringify({ action, payload }),
+        signal: ctrl.signal,
       });
       return await res.json();
     }catch(err){
-      console.error(err);
-      return { ok:false, error: String(err) };
+      console.error("callBackend gagal:", action, err);
+      const msg = err && err.name === "AbortError" ? "Koneksi terlalu lama (timeout)." : String(err);
+      return { ok:false, error: msg };
+    }finally{
+      clearTimeout(timer);
     }
   }
 
-  async function refreshUnits(){
+  // fetchX = ambil data saja (tanpa render). Aman dipanggil saat user sedang mengisi form.
+  async function fetchUnits(){
     const r = await callBackend("getUnits", {});
-    if(r && r.ok && Array.isArray(r.units)) setState({ units: r.units });
+    return (r && r.ok && Array.isArray(r.units)) ? r.units : null;
+  }
+  async function fetchMyRegistration(){
+    if(!state.user) return null;
+    const r = await callBackend("getMyRegistration", { email: state.user.email });
+    return (r && r.ok) ? r : null;   // {ok, registered, data}
+  }
+  async function refreshUnits(){
+    const units = await fetchUnits();
+    if(units) setState({ units });
+    return !!units;
+  }
+  // Dipanggil setelah login: tombol Daftar baru aktif kalau KEDUANYA sudah termuat
+  async function loadInitialData(){
+    setState({ ready:false, loadError:false });
+    const [units, reg] = await Promise.all([fetchUnits(), fetchMyRegistration()]);
+    if(!state.user) return; // sudah logout selagi memuat
+    if(units && reg){
+      setState({ units, myRegistration: reg.registered ? reg.data : null, ready:true, loadError:false });
+    } else {
+      setState({ loadError:true });
+    }
   }
 
   async function refreshAllRegs(){
@@ -486,7 +530,7 @@ const UNIT_DEFAULT = [
       .then(()=>{ setState({ loading:false }); })
       .catch(err=>{ setState({ loading:false }); showToast(mapAuthError(err), "error"); });
   }
-  function logout(){ if(fbReady) firebase.auth().signOut(); setState({ view:"login", myRegistration:null }); }
+  function logout(){ if(fbReady) firebase.auth().signOut(); setState({ view:"login", myRegistration:null, ready:false, loadError:false }); }
   function mapAuthError(err){
     const c = err.code||"";
     if(c.includes("wrong-password") || c.includes("invalid-credential")) return "Email atau password salah.";
@@ -498,10 +542,10 @@ const UNIT_DEFAULT = [
   if(fbReady){
     firebase.auth().onAuthStateChanged(async (user)=>{
       if(user){
-        setState({ user, view:"dashboard" });
-        await refreshUnits();
-        if(isAdmin()) refreshAllRegs();
+        setState({ user, view:"dashboard", myRegistration:null, ready:false, loadError:false });
         startInactivityWatch();
+        if(isAdmin()) refreshAllRegs();
+        await loadInitialData();
       } else {
         setState({ user:null, view:"login" });
         stopInactivityWatch();
@@ -601,7 +645,7 @@ const UNIT_DEFAULT = [
   }
 
   function UnitCard(u){
-    const penuh = u.slot <= 0;
+    const penuh = state.ready && u.slot <= 0;
     return `
     <div class="bg-white rounded-2xl border border-[var(--tanah)]/10 p-4 flex flex-col gap-2 hover:shadow-md transition">
       <div class="flex items-start justify-between gap-2">
@@ -610,9 +654,30 @@ const UNIT_DEFAULT = [
       </div>
       <div class="flex items-center gap-1.5 text-xs ${penuh?"text-red-600":"text-[var(--sarang-deep)]"} font-medium">
         <span class="w-1.5 h-1.5 rounded-full ${penuh?"bg-red-500":"bg-[var(--sarang)]"}"></span>
-        ${penuh ? "Slot penuh" : `${u.slot} slot tersisa`}
+        ${!state.ready ? (state.loadError ? "Slot gagal dimuat" : "Memuat slot…") : penuh ? "Slot penuh" : `${u.slot} slot tersisa`}
       </div>
     </div>`;
+  }
+
+  function DaftarAction(){
+    const base = "inline-flex items-center gap-1.5 text-sm font-semibold px-4 py-2.5 rounded-xl bg-[var(--tanah)] text-white";
+    if(state.myRegistration){
+      const r = state.myRegistration;
+      return `<div class="space-y-1.5">
+        <span class="inline-flex items-center gap-1.5 bg-white/80 text-sm font-medium px-3 py-1.5 rounded-full">${Icon("check","w-4 h-4")} Kamu sudah mendaftar</span>
+        ${r.pilihan1 ? `<p class="text-xs text-[var(--tanah)]/70">Pilihan: ${r.pilihan1} · ${r.pilihan2}${r.status ? ` · Status: ${r.status}` : ""}</p>` : ""}
+      </div>`;
+    }
+    if(state.loadError){
+      return `<div class="flex items-center gap-3 flex-wrap">
+        <span class="text-sm text-red-700 font-medium">Gagal memuat data.</span>
+        <button id="btnRetry" class="${base} hover:opacity-90">Coba lagi</button>
+      </div>`;
+    }
+    if(!state.ready){
+      return `<button disabled class="${base} opacity-50 cursor-not-allowed">Memuat data…</button>`;
+    }
+    return `<button id="btnDaftar" class="${base} hover:opacity-90">${Icon("plus","w-4 h-4")} Daftar Sekarang</button>`;
   }
 
   function DashboardView(){
@@ -627,10 +692,7 @@ const UNIT_DEFAULT = [
             <p class="text-xs font-medium text-[var(--tanah)]/70 mb-1">Halo, ${p.nama.split(" ")[0]} 👋</p>
             <h1 class="text-2xl sm:text-3xl font-bold mb-2">Pilih tempatmu bertumbuh di HIMATIKA</h1>
             <p class="text-sm text-[var(--tanah)]/70 max-w-md mb-4">6 Departemen, 1 Badan Usaha, dan Kesenatoran menunggu kontribusimu. Daftar sekali, pilih dua peminatan.</p>
-            ${state.myRegistration
-              ? `<span class="inline-flex items-center gap-1.5 bg-white/80 text-sm font-medium px-3 py-1.5 rounded-full">${Icon("check","w-4 h-4")} Kamu sudah mendaftar</span>`
-              : `<button id="btnDaftar" class="inline-flex items-center gap-1.5 bg-[var(--tanah)] text-white text-sm font-semibold px-4 py-2.5 rounded-xl hover:opacity-90">${Icon("plus","w-4 h-4")} Daftar Sekarang</button>`
-            }
+            ${DaftarAction()}
           </div>
         </div>
 
@@ -765,11 +827,11 @@ const UNIT_DEFAULT = [
                 <tr>
                   <th class="px-4 py-3">Nama</th><th class="px-4 py-3">NIM</th><th class="px-4 py-3">Klp</th>
                   <th class="px-4 py-3">Pilihan 1</th><th class="px-4 py-3">Pilihan 2</th>
-                  <th class="px-4 py-3">CV</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Aksi</th>
+                  <th class="px-4 py-3">Status</th><th class="px-4 py-3">Aksi</th>
                 </tr>
               </thead>
               <tbody>
-                ${regs.length===0 ? `<tr><td colspan="8" class="px-4 py-6 text-center text-[var(--tanah)]/40">Belum ada data — pastikan APPS_SCRIPT_URL sudah terhubung.</td></tr>` :
+                ${regs.length===0 ? `<tr><td colspan="7" class="px-4 py-6 text-center text-[var(--tanah)]/40">Belum ada data — pastikan APPS_SCRIPT_URL sudah terhubung.</td></tr>` :
                 regs.map((r,i)=>`
                   <tr class="border-b border-[var(--tanah)]/5 hover:bg-amber-50/30">
                     <td class="px-4 py-2.5 font-medium">${r.nama}</td>
@@ -777,7 +839,6 @@ const UNIT_DEFAULT = [
                     <td class="px-4 py-2.5">${r.kelompok}</td>
                     <td class="px-4 py-2.5">${r.pilihan1}</td>
                     <td class="px-4 py-2.5">${r.pilihan2}</td>
-                    <td class="px-4 py-2.5">${r.cvUrl?`<a href="${r.cvUrl}" target="_blank" class="text-[var(--sarang-deep)] underline">lihat</a>`:"-"}</td>
                     <td class="px-4 py-2.5"><span class="text-[11px] px-2 py-0.5 rounded-full ${r.status==="Diterima"?"bg-green-100 text-green-700":r.status==="Ditolak"?"bg-red-100 text-red-700":"bg-gray-100 text-gray-600"}">${r.status||"Menunggu"}</span></td>
                     <td class="px-4 py-2.5">
                       <select data-terima="${i}" class="text-xs rounded-lg border border-[var(--tanah)]/15 px-2 py-1">
@@ -796,20 +857,15 @@ const UNIT_DEFAULT = [
     </div>`;
   }
 
-  function Toast(){
-    if(!state.toast) return "";
-    const bad = state.toast.kind === "error";
-    return `<div class="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 ${bad?"bg-red-600":"bg-[var(--tanah)]"} text-white text-sm px-4 py-2.5 rounded-xl shadow-lg fade-in">${state.toast.msg}</div>`;
-  }
-
   /* ---------- Render ---------- */
   function render(){
     let html = "";
     if(!state.user) html = LoginView();
+    else if(state.view === "daftar" && (!state.ready || state.myRegistration)){ state.view = "dashboard"; html = DashboardView(); }
     else if(state.view === "daftar") html = DaftarView();
     else if(state.view === "admin" && isAdmin()) html = AdminView();
     else html = DashboardView();
-    document.getElementById("app").innerHTML = html + Toast();
+    document.getElementById("app").innerHTML = html;
     bind();
   }
 
@@ -839,7 +895,14 @@ const UNIT_DEFAULT = [
     if(btnLogout) btnLogout.addEventListener("click", logout);
 
     const btnDaftar = $("#btnDaftar");
-    if(btnDaftar) btnDaftar.addEventListener("click", ()=> setState({ view:"daftar" }));
+    if(btnDaftar) btnDaftar.addEventListener("click", ()=>{
+      if(!state.ready){ showToast("Data masih dimuat, tunggu sebentar.", "error"); return; }
+      if(state.myRegistration){ showToast("Kamu sudah mendaftar.", "error"); return; }
+      setState({ view:"daftar" });
+    });
+
+    const btnRetry = $("#btnRetry");
+    if(btnRetry) btnRetry.addEventListener("click", loadInitialData);
 
     const btnAdmin = $("#btnAdmin");
     if(btnAdmin) btnAdmin.addEventListener("click", ()=> setState({ view:"admin" }));
@@ -865,40 +928,71 @@ const UNIT_DEFAULT = [
     if(daftarForm){
       daftarForm.addEventListener("submit", async (e)=>{
         e.preventDefault();
+        if(submitting) return; // cegah klik ganda
+        if(!state.ready){ showToast("Data masih dimuat, tunggu sebentar.", "error"); return; }
+        if(state.myRegistration){ showToast("Kamu sudah mendaftar.", "error"); return; }
+
+        // Ambil SEMUA nilai form dulu, sebelum ada render ulang yang menghapusnya
         const p1 = $("#pilihan1").value, p2 = $("#pilihan2").value;
+        const alasan1 = $("#alasan1").value.trim(), alasan2 = $("#alasan2").value.trim();
+        const file = $("#cvFile").files[0];
+
         if(!p1 || !p2){ showToast("Pilih dua unit peminatan.", "error"); return; }
         if(p1 === p2){ showToast("Pilihan 1 dan 2 tidak boleh sama.", "error"); return; }
-        const file = cvFile.files[0];
         if(!file){ showToast("Unggah CV terlebih dahulu.", "error"); return; }
+        if(file.type !== "application/pdf"){ showToast("CV harus berformat PDF.", "error"); return; }
+        if(file.size > MAX_CV_BYTES){ showToast("Ukuran CV maksimal 3 MB.", "error"); return; }
 
-        setState({ loading:true });
-        const unit1 = state.units.find(u=>u.id===p1);
-        const unit2 = state.units.find(u=>u.id===p2);
-        if(unit1.slot<=0 || unit2.slot<=0){
-          setState({ loading:false });
-          showToast("Salah satu slot sudah penuh — muat ulang dan coba lagi.", "error");
-          await refreshUnits();
-          return;
-        }
+        const btn = daftarForm.querySelector('button[type="submit"]');
+        const setBusy = (label)=>{ btn.disabled = !!label; btn.textContent = label || "Kirim Pendaftaran"; };
+        submitting = true;
+        try{
+          // Cek ulang ke server tepat sebelum kirim: slot terbaru + apakah sudah terdaftar
+          setBusy("Memeriksa data…");
+          const [units, reg] = await Promise.all([fetchUnits(), fetchMyRegistration()]);
+          if(!units || !reg){ showToast("Gagal memeriksa data. Periksa koneksi lalu coba lagi.", "error"); return; }
+          setStateSilent({ units });
+          if(reg.registered){
+            setState({ myRegistration: reg.data, view:"dashboard" });
+            showToast("Kamu sudah terdaftar, tidak bisa mendaftar lagi.", "error");
+            return;
+          }
 
-        const p = profileFor(state.user.email);
-        const cvBase64 = await fileToBase64(file);
-        const payload = {
-          email: state.user.email,
-          nama: p.nama, nim: p.nim, kelompok: p.kelompok,
-          pilihan1: unit1.nama, pilihan2: unit2.nama,
-          alasan1: $("#alasan1").value.trim(),
-          alasan2: $("#alasan2").value.trim(),
-          cvFileName: file.name, cvMime: file.type, cvBase64,
-        };
-        const r = await callBackend("submitRegistration", payload);
-        setState({ loading:false });
-        if(r && r.ok){
-          setState({ myRegistration: payload, view:"dashboard" });
-          showToast("Pendaftaran berhasil dikirim!");
-          refreshUnits();
-        } else {
-          showToast(r && r.offline ? "Backend belum tersambung (mode demo)." : "Gagal mengirim, coba lagi.", "error");
+          const unit1 = units.find(u=>u.id===p1);
+          const unit2 = units.find(u=>u.id===p2);
+          if(!unit1 || !unit2){ showToast("Unit tidak ditemukan, muat ulang halaman.", "error"); return; }
+          if(unit1.slot<=0 || unit2.slot<=0){
+            showToast("Salah satu slot sudah penuh. Pilih unit lain.", "error");
+            render(); // segarkan daftar opsi (form akan ter-reset)
+            return;
+          }
+
+          setBusy("Mengirim…");
+          const p = profileFor(state.user.email);
+          const cvBase64 = await fileToBase64(file);
+          const payload = {
+            email: state.user.email,
+            nama: p.nama, nim: p.nim, kelompok: p.kelompok,
+            pilihan1: unit1.nama, pilihan2: unit2.nama,
+            alasan1, alasan2,
+            cvFileName: file.name, cvMime: file.type, cvBase64,
+          };
+          const r = await callBackend("submitRegistration", payload, 90000);
+
+          if(r && r.ok){
+            setState({ myRegistration: { pilihan1: unit1.nama, pilihan2: unit2.nama, status: "Menunggu" }, view:"dashboard" });
+            showToast("Pendaftaran berhasil dikirim!");
+            refreshUnits();
+          } else if(r && r.code === "SUDAH_DAFTAR"){
+            setState({ myRegistration: { pilihan1: "", pilihan2: "", status: "" }, view:"dashboard" });
+            showToast("Kamu sudah terdaftar, tidak bisa mendaftar lagi.", "error");
+            loadInitialData();
+          } else {
+            showToast(r && r.offline ? "Backend belum tersambung (mode demo)." : ((r && r.error) || "Gagal mengirim, coba lagi."), "error");
+          }
+        } finally {
+          submitting = false;
+          if(document.body.contains(btn)) setBusy(null);
         }
       });
     }
