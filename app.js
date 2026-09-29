@@ -10,7 +10,7 @@ const FIREBASE_CONFIG = {
 };
 
 // 2) URL Web App dari Google Apps Script (Deploy > New deployment > Web app)
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyMu64Br-npbKr41yr4Y3EJ4YPpO3CyC3YTKS38d0D80Fd7Bi7f_jp00N2GJZOI4pYu/exec";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxu4vjV1MBKmscsR_vOzT0TlPgdvLbEBEqf-gK9C4iUkfBmr2b-9iGSUBYk_ndZHc76/exec";
 
 // 3) Daftar email admin (bisa lihat & kelola pendaftaran)
 const ADMIN_EMAILS = [
