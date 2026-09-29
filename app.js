@@ -14,7 +14,7 @@ const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyMu64Br-npbKr4
 
 // 3) Daftar email admin (bisa lihat & kelola pendaftaran)
 const ADMIN_EMAILS = [
-  "magang@efro.id",
+  "admin@magang.efro",
 ];
 
 // 4) Data peserta Efromatika: email -> {nama, nim, kelompok}
