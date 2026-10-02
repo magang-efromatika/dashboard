@@ -125,6 +125,7 @@ const FIREBASE_CONFIG = {
       user: null,
       units: JSON.parse(JSON.stringify(UNIT_DEFAULT)),
       myRegistration: null,   
+      mySchedules: [],        // Dimuat dari Google Sheets "Plotingan Jadwal Wawancara"
       allRegs: [],            // Dimuat dari Apps Script untuk admin
       view: "login",          // login | dashboard | daftar | admin
       loading: false,
@@ -191,6 +192,12 @@ const FIREBASE_CONFIG = {
       const r = await callBackend("getMyRegistration", { email: state.user.email });
       return (r && r.ok) ? r : null;   
     }
+    async function fetchInterviewSchedule(){
+      if(!state.user) return [];
+      const p = profileFor(state.user.email);
+      const r = await callBackend("getInterviewSchedule", { email: state.user.email, nim: p.nim, nama: p.nama });
+      return (r && r.ok && Array.isArray(r.schedules)) ? r.schedules : (r && r.schedules) || [];
+    }
     async function refreshUnits(){
       const units = await fetchUnits();
       if(units) setState({ units });
@@ -198,10 +205,20 @@ const FIREBASE_CONFIG = {
     }
     async function loadInitialData(){
       setState({ ready:false, loadError:false });
-      const [units, reg] = await Promise.all([fetchUnits(), fetchMyRegistration()]);
+      const [units, reg, schedules] = await Promise.all([
+        fetchUnits(), 
+        fetchMyRegistration(), 
+        fetchInterviewSchedule()
+      ]);
       if(!state.user) return; 
       if(units && reg){
-        setState({ units, myRegistration: reg.registered ? reg.data : null, ready:true, loadError:false });
+        setState({ 
+          units, 
+          myRegistration: reg.registered ? reg.data : null, 
+          mySchedules: Array.isArray(schedules) ? schedules : [],
+          ready:true, 
+          loadError:false 
+        });
       } else {
         setState({ loadError:true });
       }
@@ -297,91 +314,95 @@ const FIREBASE_CONFIG = {
         eyeOff: '<path d="M1 12s4-7 11-7c2 0 3.7.5 5.1 1.2M23 12s-4 7-11 7c-2 0-3.7-.5-5.1-1.2M3 3l18 18"/>',
         search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
         info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
-        filter: '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>'
+        filter: '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+        calendar: '<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+        clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>'
       };
       return `<svg class="${cls||'w-5 h-5'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name]||""}</svg>`;
     }
+    function InterviewCards(){
+      const r = state.myRegistration;
+      const s = state.mySchedules || [];
 
-    /* ---------- Views ---------- */
-    function LoginView(){
+      // Slot Wawancara Pilihan 1 & Pilihan 2
+      const sch1 = s[0] || null;
+      const sch2 = s[1] || null;
+
+      const p1Title = r ? r.pilihan1 : "Pilihan 1";
+      const p2Title = r ? r.pilihan2 : "Pilihan 2";
+
       return `
-      <div class="min-h-screen flex items-center justify-center p-4 honey-grad relative overflow-hidden">
-        <div class="hex absolute inset-0"></div>
-        <div class="relative bg-white/90 backdrop-blur rounded-3xl shadow-xl w-full max-w-sm p-8 fade-in">
-          <div class="flex items-center gap-2 mb-1">
-            <div class="w-9 h-9 rounded-xl bg-[var(--sarang)] flex items-center justify-center text-white">${Icon("hex","w-5 h-5")}</div>
-            <span class="font-bold text-lg tracking-tight">Efromatika</span>
-          </div>
-          <p class="text-sm text-[var(--tanah)]/70 mb-6">Cek Email dan Password di Email ITERA-mu!</p>
-          <form id="loginForm" class="space-y-3">
-            <div>
-              <label class="text-xs font-medium text-[var(--tanah)]/70">Email</label>
-              <input required type="email" id="email" class="mt-1 w-full rounded-xl border border-[var(--tanah)]/15 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--sarang)]" placeholder="nama.unim@magang.efro" />
+      <div class="mb-8">
+        <h2 class="font-semibold text-sm text-[var(--tanah)]/70 uppercase tracking-wide mb-3 flex items-center gap-1.5">
+          ${Icon("calendar","w-4 h-4 text-[var(--sarang)]")}
+          <span>Jadwal Wawancara Kamu</span>
+        </h2>
+        <div class="grid sm:grid-cols-2 gap-4">
+          <!-- Card Wawancara 1 -->
+          <div class="bg-white rounded-2xl border border-[var(--tanah)]/10 p-5 shadow-sm hover:shadow-md transition relative overflow-hidden">
+            <div class="absolute top-0 right-0 w-16 h-16 bg-amber-100/50 rounded-bl-full -mr-4 -mt-4 pointer-events-none"></div>
+            <div class="flex items-center justify-between mb-3">
+              <span class="text-xs font-bold px-2.5 py-1 rounded-lg bg-amber-100 text-amber-900 border border-amber-200">
+                Wawancara 1
+              </span>
+              <span class="text-xs font-semibold text-gray-500 truncate max-w-[160px]">${p1Title}</span>
             </div>
-            <div>
-              <label class="text-xs font-medium text-[var(--tanah)]/70">Password</label>
-              <div class="relative mt-1">
-                <input required type="password" id="password" class="w-full rounded-xl border border-[var(--tanah)]/15 px-3 py-2.5 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--sarang)]" placeholder="••••••••" />
-                <button type="button" id="togglePass" tabindex="-1" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--tanah)]/50 hover:text-[var(--tanah)]">${Icon("eye","w-4 h-4")}</button>
+            
+            ${!r ? `
+              <div class="text-xs text-gray-500 py-3">
+                <p class="font-medium text-gray-700">Belum Ada Jadwal</p>
+                <p class="text-[11px] text-gray-400 mt-0.5">Silakan kirim pendaftaran terlebih dahulu.</p>
               </div>
-            </div>
-            <button type="submit" class="w-full rounded-xl bg-[var(--tanah)] text-white py-2.5 text-sm font-semibold hover:opacity-90 transition disabled:opacity-50" ${state.loading?"disabled":""}>
-              ${state.loading ? "Memproses…" : "Masuk"}
-            </button>
-          </form>
-          <p class="text-[11px] text-center text-[var(--tanah)]/50 mt-5">Belum punya akun? Hubungi panitia Efromatika.</p>
-        </div>
-      </div>`;
-    }
-  
-    function unitBadge(jenis){
-      const map = { "Departemen":"bg-amber-100 text-amber-800", "Badan Usaha":"bg-orange-100 text-orange-800", "Kesenatoran":"bg-yellow-200 text-yellow-900" };
-      return `<span class="text-[11px] font-medium px-2 py-0.5 rounded-full ${map[jenis]||"bg-gray-100 text-gray-700"}">${jenis}</span>`;
-    }
-  
-    function UnitCard(u){
-      const penuh = state.ready && u.slot <= 0;
-      return `
-      <div class="bg-white rounded-2xl border border-[var(--tanah)]/10 p-4 flex flex-col gap-2 hover:shadow-md transition">
-        <div class="flex items-start justify-between gap-2">
-          <h3 class="font-semibold text-sm leading-snug">${u.nama}</h3>
-          ${unitBadge(u.jenis)}
-        </div>
-        <div class="flex items-center gap-1.5 text-xs ${penuh?"text-red-600":"text-[var(--sarang-deep)]"} font-medium">
-          <span class="w-1.5 h-1.5 rounded-full ${penuh?"bg-red-500":"bg-[var(--sarang)]"}"></span>
-          ${!state.ready ? (state.loadError ? "Slot gagal dimuat" : "Memuat slot…") : penuh ? "Slot penuh" : `${u.slot} slot tersisa`}
-        </div>
-      </div>`;
-    }
-  
-    function DaftarAction(){
-      const base = "inline-flex items-center gap-1.5 text-sm font-semibold px-4 py-2.5 rounded-xl bg-[var(--tanah)] text-white";
-      if(state.myRegistration){
-        const r = state.myRegistration;
-        const statusText = r.status === "Diterima" ? `Diterima di ${r.diterimaDi}` : (r.status || "Menunggu");
-        const statusColor = r.status === "Diterima" ? "bg-green-100 text-green-800 border-green-300" : r.status === "Ditolak" ? "bg-red-100 text-red-800 border-red-300" : "bg-yellow-100 text-yellow-800 border-yellow-300";
-        return `<div class="space-y-2">
-          <span class="inline-flex items-center gap-1.5 bg-white/90 text-sm font-medium px-3 py-1.5 rounded-full shadow-sm">${Icon("check","w-4 h-4 text-green-600")} Kamu sudah mendaftar</span>
-          <p class="text-xs text-[var(--tanah)]/80">Pilihan 1: <strong>${r.pilihan1}</strong> · Pilihan 2: <strong>${r.pilihan2}</strong></p>
-          <div>
-            <span class="inline-block text-xs font-semibold px-2.5 py-1 rounded-lg border ${statusColor}">
-              Status: ${statusText}
-            </span>
+            ` : `
+              <div class="space-y-2 mt-2">
+                <div class="flex items-center gap-2 text-xs text-gray-700">
+                  <span class="text-amber-700">${Icon("calendar","w-4 h-4")}</span>
+                  <span class="font-semibold">Hari:</span>
+                  <span class="text-gray-900 font-medium">${sch1 && sch1.hari ? sch1.hari : "Menunggu Plotingan"}</span>
+                </div>
+                <div class="flex items-center gap-2 text-xs text-gray-700">
+                  <span class="text-amber-700">${Icon("clock","w-4 h-4")}</span>
+                  <span class="font-semibold">Waktu:</span>
+                  <span class="text-gray-900 font-medium">${sch1 && sch1.waktu ? sch1.waktu : "Akan diinfokan"}</span>
+                </div>
+              </div>
+            `}
           </div>
-        </div>`;
-      }
-      if(state.loadError){
-        return `<div class="flex items-center gap-3 flex-wrap">
-          <span class="text-sm text-red-700 font-medium">Gagal memuat data.</span>
-          <button id="btnRetry" class="${base} hover:opacity-90">Coba lagi</button>
-        </div>`;
-      }
-      if(!state.ready){
-        return `<button disabled class="${base} opacity-50 cursor-not-allowed">Memuat data…</button>`;
-      }
-      return `<button id="btnDaftar" class="${base} hover:opacity-90">${Icon("plus","w-4 h-4")} Daftar Sekarang</button>`;
+
+          <!-- Card Wawancara 2 -->
+          <div class="bg-white rounded-2xl border border-[var(--tanah)]/10 p-5 shadow-sm hover:shadow-md transition relative overflow-hidden">
+            <div class="absolute top-0 right-0 w-16 h-16 bg-orange-100/50 rounded-bl-full -mr-4 -mt-4 pointer-events-none"></div>
+            <div class="flex items-center justify-between mb-3">
+              <span class="text-xs font-bold px-2.5 py-1 rounded-lg bg-orange-100 text-orange-900 border border-orange-200">
+                Wawancara 2
+              </span>
+              <span class="text-xs font-semibold text-gray-500 truncate max-w-[160px]">${p2Title}</span>
+            </div>
+
+            ${!r ? `
+              <div class="text-xs text-gray-500 py-3">
+                <p class="font-medium text-gray-700">Belum Ada Jadwal</p>
+                <p class="text-[11px] text-gray-400 mt-0.5">Silakan kirim pendaftaran terlebih dahulu.</p>
+              </div>
+            ` : `
+              <div class="space-y-2 mt-2">
+                <div class="flex items-center gap-2 text-xs text-gray-700">
+                  <span class="text-orange-700">${Icon("calendar","w-4 h-4")}</span>
+                  <span class="font-semibold">Hari:</span>
+                  <span class="text-gray-900 font-medium">${sch2 && sch2.hari ? sch2.hari : "Menunggu Plotingan"}</span>
+                </div>
+                <div class="flex items-center gap-2 text-xs text-gray-700">
+                  <span class="text-orange-700">${Icon("clock","w-4 h-4")}</span>
+                  <span class="font-semibold">Waktu:</span>
+                  <span class="text-gray-900 font-medium">${sch2 && sch2.waktu ? sch2.waktu : "Akan diinfokan"}</span>
+                </div>
+              </div>
+            `}
+          </div>
+        </div>
+      </div>`;
     }
-  
+
     function DashboardView(){
       const p = profileFor(state.user.email);
       return `
@@ -397,7 +418,9 @@ const FIREBASE_CONFIG = {
               ${DaftarAction()}
             </div>
           </div>
-  
+
+          ${InterviewCards()}
+
           <div class="flex items-center justify-between mb-3">
             <h2 class="font-semibold text-sm text-[var(--tanah)]/70 uppercase tracking-wide">Unit yang tersedia</h2>
           </div>
