@@ -10,13 +10,35 @@ const FIREBASE_CONFIG = {
   };
   
   // 2) URL Web App dari Google Apps Script (Deploy > New deployment > Web app)
-  const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyAItn052GrHyliqie-NqsNTf3UZO4qQAh56liOq-DcPsOqXq4ROF53c6V1OHux6Y7x/exec";
+  const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz96PGvC3pkuWHY6UgAg73qAYtWS4aDG9_yTzuUtXSQ2V_5JcFU-w2rzMsIYwLBaomq/exec";
   
   // 3) Daftar email admin (bisa lihat & kelola pendaftaran)
   const ADMIN_EMAILS = [
     "admin@magang.efro",
   ];
   
+  // 3b) Admin per departemen: email akun Firebase -> id unit (kolom "id" di UNIT_DEFAULT / sheet Unit).
+  //     Admin departemen hanya bisa mengatur jadwal wawancara untuk unitnya sendiri.
+  //     Daftar yang sama WAJIB ada di code.gs (ADMIN_DEPT) karena backend yang memvalidasi.
+  const ADMIN_DEPT = {
+    "eksternal@magang.efro": "Eksternal",
+    "kominfo@magang.efro":     "Kominfo",
+    "minbat@magang.efro":     "Minbat",
+    "ilprof@magang.efro":   "Ilprof",
+    "internal@magang.efro":  "Internal",
+    "psda@magang.efro":      "PSDA",
+    "bumh@magang.efro":      "BUMH",
+    "senator@magang.efro":   "Senator",
+  };
+
+  // 3c) Aturan jadwal wawancara (samakan dengan INTERVIEW di code.gs)
+  const INTERVIEW = {
+    dates: ["2026-10-05", "2026-10-06", "2026-10-07"], // hanya 5 - 7 Oktober 2026
+    start: "08:00",
+    end: "21:00",
+    durationMin: 10,
+  };
+
   // 4) Data peserta Efromatika: email -> {nama, nim, kelompok}
   const catra = {
     'khayla.001@magang.efro': { nama: 'KHAYLA AZIZAH RAHMAN', nim: 125160001, kelompok: 5 },
@@ -133,11 +155,20 @@ const FIREBASE_CONFIG = {
       adminFilterUnit: "all", // all | unit_name
       adminSearch: "",        // kata kunci pencarian
       selectedModalReg: null, // pendaftar yang sedang dibuka modal alasannya
+      mySchedules: [],        // jadwal wawancara milik peserta
+      candidates: [],         // peserta yang bisa diwawancara (admin)
+      schedules: [],          // semua jadwal yang relevan (admin, untuk cek bentrok)
+      jadwalUnit: "",         // nama unit yang sedang diatur
+      scopeSuper: false,      // true jika admin magang (boleh pilih unit apa pun)
+      jadwalLoaded: false,
+      jadwalError: false,
     };
     let submitting = false;   
     const MAX_CV_BYTES = 3 * 1024 * 1024; // 3 MB
   
     const isAdmin = () => state.user && ADMIN_EMAILS.includes(state.user.email);
+    const adminDeptId = () => (state.user && ADMIN_DEPT[state.user.email]) || null;
+    const canSchedule = () => !!state.user && (isAdmin() || !!adminDeptId());
   
     function setState(patch){ state = {...state, ...patch}; render(); }
     function setStateSilent(patch){ state = {...state, ...patch}; } 
@@ -202,6 +233,7 @@ const FIREBASE_CONFIG = {
       if(!state.user) return; 
       if(units && reg){
         setState({ units, myRegistration: reg.registered ? reg.data : null, ready:true, loadError:false });
+        if(reg.registered) refreshMySchedules();
       } else {
         setState({ loadError:true });
       }
@@ -213,6 +245,62 @@ const FIREBASE_CONFIG = {
       if(r && r.ok) setState({ allRegs: r.data || [] });
     }
   
+    /* ---------- Jadwal wawancara: backend & helper ---------- */
+    // Aksi jadwal memakai token Firebase supaya backend bisa memverifikasi siapa yang memanggil
+    async function callSecure(action, payload, timeoutMs){
+      if(!fbReady || !state.user) return { ok:false, error:"Belum login." };
+      try{
+        const idToken = await state.user.getIdToken();
+        return await callBackend(action, { ...(payload||{}), idToken }, timeoutMs);
+      }catch(err){
+        return { ok:false, error:String(err) };
+      }
+    }
+    async function refreshMySchedules(){
+      const r = await callSecure("getMySchedules", {});
+      if(r && r.ok) setState({ mySchedules: r.data || [] });
+    }
+    async function refreshInterviewData(){
+      const r = await callSecure("getInterviewData", {});
+      if(r && r.ok){
+        let unit = state.jadwalUnit;
+        if(!r.isSuper) unit = r.unit;
+        else if(!unit) unit = (state.units[0] || {}).nama || "";
+        setState({ candidates:r.candidates||[], schedules:r.schedules||[], scopeSuper:!!r.isSuper,
+                   jadwalUnit:unit, jadwalLoaded:true, jadwalError:false });
+        return true;
+      }
+      showToast((r && r.error) || "Gagal memuat data jadwal.", "error");
+      setState({ jadwalError:true });
+      return false;
+    }
+
+    const esc = (v) => String(v == null ? "" : v).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    const toMin = (t) => { const [h,m] = String(t).split(":").map(Number); return h*60 + m; };
+    const toHHMM = (m) => String(Math.floor(m/60)).padStart(2,"0") + ":" + String(m%60).padStart(2,"0");
+    const overlaps = (aS, aE, bS, bE) => toMin(aS) < toMin(bE) && toMin(bS) < toMin(aE);
+    function timeSlots(){
+      const out = [];
+      for(let m = toMin(INTERVIEW.start); m + INTERVIEW.durationMin <= toMin(INTERVIEW.end); m += INTERVIEW.durationMin) out.push(toHHMM(m));
+      return out;
+    }
+    function fmtTanggal(iso, short){
+      const [y, m, d] = iso.split("-").map(Number);
+      return new Date(y, m-1, d).toLocaleDateString("id-ID", short
+        ? { weekday:"short", day:"numeric", month:"short" }
+        : { weekday:"long", day:"numeric", month:"long", year:"numeric" });
+    }
+    // "" = tersedia | "terisi" = dipakai peserta lain di unit ini | "bentrok" = peserta sudah wawancara di unit lain
+    function slotStatus(c, unitNama, tanggal, mulai){
+      const selesai = toHHMM(toMin(mulai) + INTERVIEW.durationMin);
+      for(const s of state.schedules){
+        if(s.tanggal !== tanggal || !overlaps(mulai, selesai, s.mulai, s.selesai)) continue;
+        if(s.email === c.email && s.unit !== unitNama) return "bentrok";
+        if(s.unit === unitNama && s.email !== c.email) return "terisi";
+      }
+      return "";
+    }
+
     /* ---------- Auth ---------- */
     function login(email, password){
       setState({ loading:true });
@@ -221,7 +309,7 @@ const FIREBASE_CONFIG = {
         .then(()=>{ setState({ loading:false }); })
         .catch(err=>{ setState({ loading:false }); showToast(mapAuthError(err), "error"); });
     }
-    function logout(){ if(fbReady) firebase.auth().signOut(); setState({ view:"login", myRegistration:null, ready:false, loadError:false }); }
+    function logout(){ if(fbReady) firebase.auth().signOut(); setState({ view:"login", myRegistration:null, ready:false, loadError:false, mySchedules:[], candidates:[], schedules:[], jadwalLoaded:false, jadwalError:false }); }
     function mapAuthError(err){
       const c = err.code||"";
       if(c.includes("wrong-password") || c.includes("invalid-credential")) return "Email atau password salah.";
@@ -297,7 +385,8 @@ const FIREBASE_CONFIG = {
         eyeOff: '<path d="M1 12s4-7 11-7c2 0 3.7.5 5.1 1.2M23 12s-4 7-11 7c-2 0-3.7-.5-5.1-1.2M3 3l18 18"/>',
         search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
         info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
-        filter: '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>'
+        filter: '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+        calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>'
       };
       return `<svg class="${cls||'w-5 h-5'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name]||""}</svg>`;
     }
@@ -398,6 +487,8 @@ const FIREBASE_CONFIG = {
             </div>
           </div>
   
+          ${JadwalCard()}
+
           <div class="flex items-center justify-between mb-3">
             <h2 class="font-semibold text-sm text-[var(--tanah)]/70 uppercase tracking-wide">Unit yang tersedia</h2>
           </div>
@@ -417,6 +508,7 @@ const FIREBASE_CONFIG = {
             <span class="font-bold text-sm">Efromatika</span>
           </div>
           <div class="flex items-center gap-2">
+            ${canSchedule() ? `<button id="btnJadwal" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-[var(--tanah)]/15 bg-white hover:bg-amber-50 text-[var(--tanah)] flex items-center gap-1.5 shadow-sm">${Icon("calendar","w-3.5 h-3.5")} Jadwal Wawancara</button>` : ""}
             ${isAdmin() ? `<button id="btnAdmin" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-[var(--tanah)]/15 bg-amber-100 hover:bg-amber-200 text-amber-900 flex items-center gap-1.5 shadow-sm">${Icon("shield","w-3.5 h-3.5")} Admin Panel</button>` : ""}
             <div class="text-right hidden sm:block">
               <p class="text-xs font-semibold leading-none">${p.nama}</p>
@@ -493,6 +585,211 @@ const FIREBASE_CONFIG = {
           </div>
         </main>
       </div>`;
+    }
+
+    /* ---------- JADWAL WAWANCARA: CARD PESERTA ---------- */
+    function JadwalCard(){
+      const r = state.myRegistration;
+      if(!r || r.status === "Ditolak") return "";
+      const units = [r.pilihan1, r.pilihan2].filter(Boolean);
+      if(!units.length) return "";
+      const rows = units.map((u, idx) => {
+        const s = state.mySchedules.find(x => x.unit === u);
+        const lokasi = s && s.lokasi
+          ? (/^https?:\/\//.test(s.lokasi)
+              ? `<a href="${esc(s.lokasi)}" target="_blank" rel="noopener" class="underline text-amber-800 break-all">${esc(s.lokasi)}</a>`
+              : esc(s.lokasi))
+          : "";
+        return `
+        <div class="rounded-2xl border ${s ? "border-green-200 bg-green-50/60" : "border-[var(--tanah)]/10 bg-amber-50/40"} p-4">
+          <p class="text-[11px] font-semibold text-[var(--tanah)]/50 uppercase tracking-wide mb-0.5">Pilihan ${idx+1}</p>
+          <p class="text-sm font-semibold leading-snug mb-2">${esc(u)}</p>
+          ${s ? `
+            <p class="text-xs font-medium">📅 ${fmtTanggal(s.tanggal)}</p>
+            <p class="text-xs mt-1">🕒 ${s.mulai} – ${s.selesai} WIB</p>
+            ${lokasi ? `<p class="text-xs mt-1 text-[var(--tanah)]/70">📍 ${lokasi}</p>` : ""}
+          ` : `<p class="text-xs text-[var(--tanah)]/60">Belum dijadwalkan. Pantau terus halaman ini.</p>`}
+        </div>`;
+      }).join("");
+      return `
+      <section class="bg-white rounded-3xl border border-[var(--tanah)]/10 p-5 sm:p-6 mb-8 fade-in">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-[var(--sarang-deep)]">${Icon("calendar","w-4 h-4")}</span>
+          <h2 class="font-semibold text-sm uppercase tracking-wide text-[var(--tanah)]/80">Jadwal Wawancara</h2>
+        </div>
+        <p class="text-xs text-[var(--tanah)]/60 mb-4">Wawancara kedua pilihanmu diatur agar tidak bertabrakan. Jadwal bisa berubah, cek halaman ini secara berkala.</p>
+        <div class="grid sm:grid-cols-2 gap-3">${rows}</div>
+      </section>`;
+    }
+
+    /* ---------- JADWAL WAWANCARA: VIEW ADMIN ---------- */
+    function currentJadwalList(){
+      return state.candidates.filter(c => c.pilihan1 === state.jadwalUnit || c.pilihan2 === state.jadwalUnit);
+    }
+    function timeOptionsHTML(c, unitNama, tanggal, selected){
+      if(!tanggal) return `<option value="" disabled selected>Pilih tanggal dulu</option>`;
+      return `<option value="" disabled ${selected ? "" : "selected"}>Pilih jam…</option>` +
+        timeSlots().map(t => {
+          const st = slotStatus(c, unitNama, tanggal, t);
+          const end = toHHMM(toMin(t) + INTERVIEW.durationMin);
+          const tag = st === "terisi" ? " (terisi)" : st === "bentrok" ? " (bentrok)" : "";
+          return `<option value="${t}" ${st ? "disabled" : ""} ${t === selected ? "selected" : ""}>${t} – ${end}${tag}</option>`;
+        }).join("");
+    }
+
+    function JadwalView(){
+      const p = profileFor(state.user.email);
+      const unit = state.jadwalUnit;
+      const list = currentJadwalList();
+      const inputCls = "text-xs rounded-xl border border-[var(--tanah)]/20 px-2.5 py-1.5 bg-white focus:ring-2 focus:ring-[var(--sarang)] focus:outline-none";
+      const dateLabel = INTERVIEW.dates.map(d => fmtTanggal(d, true)).join(", ");
+
+      let body;
+      if(state.jadwalError && !state.jadwalLoaded){
+        body = `<div class="p-8 text-center text-sm text-red-700">Gagal memuat data. <button id="btnJadwalRetry" class="ml-2 underline font-semibold">Coba lagi</button></div>`;
+      } else if(!state.jadwalLoaded){
+        body = `<div class="p-8 text-center text-sm text-gray-500">Memuat data jadwal…</div>`;
+      } else if(list.length === 0){
+        body = `<div class="p-8 text-center text-xs text-gray-400">Belum ada pendaftar yang memilih ${esc(unit)}.</div>`;
+      } else {
+        body = `
+        <div class="overflow-x-auto scrollbar-thin">
+          <table class="w-full text-sm text-left border-collapse min-w-[900px]">
+            <thead class="text-[11px] uppercase bg-amber-50/60 text-[var(--tanah)]/70 border-b border-[var(--tanah)]/10">
+              <tr>
+                <th class="px-4 py-3">Peserta</th>
+                <th class="px-4 py-3">Urutan Pilihan</th>
+                <th class="px-4 py-3">Jadwal Saat Ini</th>
+                <th class="px-4 py-3">Atur Jadwal</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              ${list.map((c, i) => {
+                const ex = state.schedules.find(s => s.email === c.email && s.unit === unit);
+                const others = state.schedules.filter(s => s.email === c.email && s.unit !== unit);
+                return `
+                <tr class="hover:bg-amber-50/30 transition align-top">
+                  <td class="px-4 py-3">
+                    <p class="font-semibold text-xs text-gray-900">${esc(c.nama)}</p>
+                    <p class="text-[11px] text-gray-500">NIM: ${esc(c.nim)} · Klp: ${esc(c.kelompok)}</p>
+                  </td>
+                  <td class="px-4 py-3 text-xs">
+                    <span class="font-medium">${c.pilihan1 === unit ? "Pilihan 1" : "Pilihan 2"}</span>
+                    ${others.map(o => `<p class="text-[10px] text-gray-500 mt-1">Wawancara lain: ${esc(o.unit)} · ${fmtTanggal(o.tanggal, true)} ${o.mulai}</p>`).join("")}
+                  </td>
+                  <td class="px-4 py-3 text-xs">
+                    ${ex ? `<span class="inline-block px-2.5 py-1 rounded-full text-[11px] font-semibold bg-green-100 text-green-800">${fmtTanggal(ex.tanggal, true)} · ${ex.mulai}–${ex.selesai}</span>
+                            ${ex.lokasi ? `<p class="text-[10px] text-gray-500 mt-1">${esc(ex.lokasi)}</p>` : ""}`
+                        : `<span class="inline-block px-2.5 py-1 rounded-full text-[11px] font-semibold bg-yellow-100 text-yellow-800">Belum dijadwalkan</span>`}
+                  </td>
+                  <td class="px-4 py-3">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <select data-jd-date="${i}" class="${inputCls}">
+                        <option value="" disabled ${ex ? "" : "selected"}>Tanggal…</option>
+                        ${INTERVIEW.dates.map(d => `<option value="${d}" ${ex && ex.tanggal === d ? "selected" : ""}>${fmtTanggal(d, true)}</option>`).join("")}
+                      </select>
+                      <select data-jd-time="${i}" class="${inputCls}">
+                        ${timeOptionsHTML(c, unit, ex ? ex.tanggal : "", ex ? ex.mulai : "")}
+                      </select>
+                      <input data-jd-loc="${i}" value="${esc(ex ? ex.lokasi : "")}" placeholder="Ruang / link meeting" class="${inputCls} w-40" />
+                      <button data-jd-save="${i}" class="text-xs font-semibold px-3 py-1.5 rounded-xl bg-[var(--tanah)] text-white hover:opacity-90 disabled:opacity-50">Simpan</button>
+                      ${ex ? `<button data-jd-del="${i}" class="text-xs font-medium px-3 py-1.5 rounded-xl border border-red-200 text-red-700 hover:bg-red-50">Hapus</button>` : ""}
+                    </div>
+                  </td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>`;
+      }
+
+      return `
+      <div class="min-h-screen pb-12">
+        ${Navbar(p)}
+        <main class="max-w-6xl mx-auto px-4 py-8">
+          <div class="flex items-center justify-between mb-4">
+            <button id="btnBack" class="text-sm font-medium text-[var(--tanah)]/70 hover:text-[var(--tanah)] flex items-center gap-1">← Kembali ke dashboard</button>
+            <button id="btnRefreshJadwal" class="text-xs bg-amber-200/60 hover:bg-amber-200 text-amber-900 px-3 py-1.5 rounded-lg font-medium transition">🔄 Segarkan Data</button>
+          </div>
+
+          <div class="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-5 mb-6">
+            <h1 class="text-xl font-bold">Jadwal Wawancara</h1>
+            <p class="text-xs text-[var(--tanah)]/70 mt-1">Hanya tanggal ${dateLabel} 2026, durasi ${INTERVIEW.durationMin} menit per sesi (${INTERVIEW.start}–${INTERVIEW.end}).
+              Jam bertanda <strong>terisi</strong> sudah dipakai peserta lain di unit ini, <strong>bentrok</strong> berarti peserta sudah punya wawancara di unit lain pada jam tersebut.</p>
+            <div class="mt-3">
+              ${state.scopeSuper
+                ? `<select id="jadwalUnitSelect" class="bg-white border border-[var(--tanah)]/20 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--sarang)]">
+                     ${state.units.map(u => `<option value="${esc(u.nama)}" ${u.nama === unit ? "selected" : ""}>${esc(u.nama)}</option>`).join("")}
+                   </select>`
+                : `<span class="inline-block text-xs font-semibold px-3 py-1.5 rounded-lg bg-white border border-[var(--tanah)]/10">${esc(unit || "…")}</span>`}
+            </div>
+          </div>
+
+          <div class="bg-white rounded-2xl border border-[var(--tanah)]/10 overflow-hidden shadow-sm">${body}</div>
+        </main>
+      </div>`;
+    }
+
+    function bindJadwal(){
+      const q = (sel) => document.querySelector(sel);
+
+      const btnJadwal = q("#btnJadwal");
+      if(btnJadwal) btnJadwal.addEventListener("click", ()=>{
+        setState({ view:"jadwal", jadwalError:false });
+        refreshInterviewData();
+      });
+      if(state.view !== "jadwal") return;
+
+      ["#btnRefreshJadwal", "#btnJadwalRetry"].forEach(id => {
+        const b = q(id);
+        if(b) b.addEventListener("click", async ()=>{
+          showToast("Memperbarui data jadwal...");
+          if(await refreshInterviewData()) showToast("Data jadwal terbaru dimuat.");
+        });
+      });
+
+      const unitSel = q("#jadwalUnitSelect");
+      if(unitSel) unitSel.addEventListener("change", e => setState({ jadwalUnit: e.target.value }));
+
+      const unit = state.jadwalUnit;
+      const list = currentJadwalList();
+
+      document.querySelectorAll("[data-jd-date]").forEach(sel => {
+        sel.addEventListener("change", ()=>{
+          const i = +sel.getAttribute("data-jd-date");
+          const c = list[i]; if(!c) return;
+          q(`[data-jd-time="${i}"]`).innerHTML = timeOptionsHTML(c, unit, sel.value, "");
+        });
+      });
+
+      document.querySelectorAll("[data-jd-save]").forEach(btn => {
+        btn.addEventListener("click", async ()=>{
+          const i = +btn.getAttribute("data-jd-save");
+          const c = list[i]; if(!c) return;
+          const tanggal = q(`[data-jd-date="${i}"]`).value;
+          const mulai = q(`[data-jd-time="${i}"]`).value;
+          const lokasi = q(`[data-jd-loc="${i}"]`).value.trim();
+          if(!INTERVIEW.dates.includes(tanggal)){ showToast("Pilih tanggal antara 5 - 7 Oktober 2026.", "error"); return; }
+          if(!mulai){ showToast("Pilih jam wawancara.", "error"); return; }
+          if(slotStatus(c, unit, tanggal, mulai)){ showToast("Jam tersebut tidak tersedia.", "error"); return; }
+          btn.disabled = true; btn.textContent = "Menyimpan…";
+          const r = await callSecure("setSchedule", { email:c.email, unit, tanggal, mulai, lokasi });
+          if(r && r.ok) showToast(`Jadwal ${c.nama} disimpan.`);
+          else showToast((r && r.error) || "Gagal menyimpan jadwal.", "error");
+          await refreshInterviewData();   // selalu sinkron ulang (mungkin ada perubahan admin lain)
+        });
+      });
+
+      document.querySelectorAll("[data-jd-del]").forEach(btn => {
+        btn.addEventListener("click", async ()=>{
+          const c = list[+btn.getAttribute("data-jd-del")]; if(!c) return;
+          if(!confirm(`Hapus jadwal wawancara ${c.nama}?`)) return;
+          const r = await callSecure("deleteSchedule", { email:c.email, unit });
+          if(r && r.ok) showToast("Jadwal dihapus.");
+          else showToast((r && r.error) || "Gagal menghapus jadwal.", "error");
+          await refreshInterviewData();
+        });
+      });
     }
 
     /* ---------- ADMIN VIEW ---------- */
@@ -719,6 +1016,7 @@ const FIREBASE_CONFIG = {
       else if(state.view === "daftar" && (!state.ready || state.myRegistration)){ state.view = "dashboard"; html = DashboardView(); }
       else if(state.view === "daftar") html = DaftarView();
       else if(state.view === "admin" && isAdmin()) html = AdminView();
+      else if(state.view === "jadwal" && canSchedule()) html = JadwalView();
       else html = DashboardView();
       document.getElementById("app").innerHTML = html;
       bind();
@@ -756,6 +1054,8 @@ const FIREBASE_CONFIG = {
         setState({ view:"daftar" });
       });
   
+      bindJadwal();
+
       const btnRetry = $("#btnRetry");
       if(btnRetry) btnRetry.addEventListener("click", loadInitialData);
   
